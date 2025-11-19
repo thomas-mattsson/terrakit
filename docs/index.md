@@ -17,7 +17,7 @@ uv pip install terrakit
 Check TerraKit is working as expected by running:
 
 ```bash
-python -c "import terrakit; data_source='nasa_earthdata'; dc = terrakit.DataConnector(connector_type=data_source)"
+python -c "import terrakit; data_source='sentinel_aws'; dc = terrakit.DataConnector(connector_type=data_source)"
 ```
 
 Take a look at the [example notebooks](examples/labels_to_data.ipynb) for more help getting started with TerraKit. 

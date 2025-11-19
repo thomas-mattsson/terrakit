@@ -2,11 +2,10 @@
 
 # TerraKit
 [![PyPI version](https://img.shields.io/pypi/v/terrakit?color=blue&logo=pypi&logoColor=white)](https://pypi.org/project/terrakit/)
-[![Python versions](https://img.shields.io/pypi/pyversions/terrakit?logo=python&logoColor=white)](https://pypi.org/project/terrakit/)
-[![Documentation](https://img.shields.io/badge/docs-mkdocs-blue?logo=materialformkdocs)](./docs/)
+[![Documentation](https://img.shields.io/badge/docs-mkdocs-blue?logo=materialformkdocs)](https://terrastackai.github.io/terrakit/)
 [![Downloads](https://img.shields.io/pypi/dm/terrakit?color=orange&logo=pypi)](https://pypi.org/project/terrakit/)
-[![License](https://img.shields.io/github/license/terrastacai/terrakit?color=green)](LICENSE)
-[![GitHub stars](https://img.shields.io/github/stars/IBM/terrakit?style=social)](https://github.com/terrastackai/terrakit/stargazers)
+[![License](https://img.shields.io/github/license/terrastackai/terrakit?color=green)](LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/terrastackai/terrakit?style=social)](https://github.com/terrastackai/terrakit/stargazers)
 
 **🚀 A comprehensive library for generating ML-ready geospatial dataset 🌍**
 
@@ -40,7 +39,7 @@ pip install terrakit
 Check TerraKit is working as expected by running:
 
 ```bash
-python -c "import terrakit; data_source='nasa_earthdata'; dc = terrakit.DataConnector(connector_type=data_source)"
+python -c "import terrakit; data_source='sentinel_aws'; dc = terrakit.DataConnector(connector_type=data_source)"
 ```
 
 > **_NOTE_**: _Activate the uv virtual environment using `source .venv/bin/activate`. Alternatively use `uv run` ahead of any python and pip commands._
