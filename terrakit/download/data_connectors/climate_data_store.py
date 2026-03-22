@@ -21,12 +21,14 @@ from terrakit.download.geodata_utils import save_cog
 from ..connector import Connector
 from ..geodata_utils import (
     load_and_list_collections,
+    map_netcdf_variables_to_requested_bands,
     save_data_array_to_file,
 )
 from terrakit.general_utils.exceptions import (
     TerrakitValidationError,
     TerrakitValueError,
 )
+from terrakit.general_utils.geospatial_util import _convert_to_360_degree_system
 from terrakit.validate.helpers import (
     check_collection_exists,
     check_date_format,
@@ -468,7 +470,7 @@ class CDS(Connector):
             params["horizontal_resolution"] = "0_44_degree_x_0_44_degree"
             params["temporal_resolution"] = "daily_mean"
             params["ensemble_member"] = "r1i1p1"
-            params["format"] = "netcdf"
+            params["data_format"] = "netcdf"
 
             # Add start_year and end_year based on date range
             start_date = datetime.strptime(date_start, "%Y-%m-%d")
@@ -478,17 +480,22 @@ class CDS(Connector):
 
         else:
             # ERA5 and other collections use bbox directly
+            # CDS API expects area as [North, West, South, East]
+            # Input bbox is [min_lon, min_lat, max_lon, max_lat] = [West, South, East, North]
+            # CDS uses 0-360° longitude convention, so convert negative longitudes
+            converted_lons = _convert_to_360_degree_system([bbox[0], bbox[2]])
+
             params["area"] = [
-                bbox[0],  # West
-                bbox[1],  # South
-                bbox[2],  # East
-                bbox[3],  # North
+                bbox[3],  # North (max_lat)
+                converted_lons[0],  # West (min_lon, converted to 0-360°)
+                bbox[1],  # South (min_lat)
+                converted_lons[1],  # East (max_lon, converted to 0-360°)
             ]
 
             # Set default parameters for ERA5 collections
             # These can be overridden by query_params
             params["product_type"] = "reanalysis"
-            params["format"] = "netcdf"
+            params["data_format"] = "netcdf"
             params["daily_statistic"] = "daily_mean"
             params["frequency"] = "6_hourly"
             params["time_zone"] = "utc+00:00"
@@ -655,6 +662,23 @@ class CDS(Connector):
         """Validate bbox against collection constraints."""
 
         basic_bbox_validation(bbox, self.connector_type)
+
+        # Check minimum bbox size for ERA5 collections (0.25° grid resolution)
+        if not self._is_cordex_collection(collection_name):
+            min_lon, min_lat, max_lon, max_lat = bbox
+            lon_span = max_lon - min_lon
+            lat_span = max_lat - min_lat
+
+            # ERA5 has 0.25° resolution, require at least 0.25° in each dimension
+            MIN_RESOLUTION = 0.25
+            if lon_span < MIN_RESOLUTION or lat_span < MIN_RESOLUTION:
+                raise TerrakitValidationError(
+                    message=f"Bounding box too small for ERA5 data resolution. "
+                    f"Current size: {lon_span:.4f}° × {lat_span:.4f}°. "
+                    f"Minimum required: {MIN_RESOLUTION}° × {MIN_RESOLUTION}° "
+                    f"(ERA5 grid resolution is 0.25°). "
+                    f"Please increase your bounding box size."
+                )
 
         # For CORDEX collections, map bbox to domain
         if self._is_cordex_collection(collection_name):
@@ -973,10 +997,17 @@ class CDS(Connector):
         # CDS may return multiple NetCDF files (one per variable)
         # We need to merge them by date to avoid duplicates
 
+        # Create mapping from NetCDF variable names to requested band names
+        # CDS returns abbreviated names (e.g., "t2m"), but we want to use
+        # the requested names (e.g., "2m_temperature") as band labels
+        netcdf_to_band_map = map_netcdf_variables_to_requested_bands(
+            netcdf_files, bands
+        )
+
         # First, collect all data organized by date
         date_data_dict: Dict[
             str, Dict[str, xr.DataArray]
-        ] = {}  # {date_str: {var_name: DataArray}}
+        ] = {}  # {date_str: {netcdf_var_name: DataArray}}
 
         for netcdf_file in netcdf_files:
             ds = xr.open_dataset(netcdf_file)
@@ -1026,23 +1057,25 @@ class CDS(Connector):
             band_names = []
             for var_name in sorted(var_dict.keys()):
                 da_var = var_dict[var_name]
+                # Drop time coordinate if it exists (will be added back after concatenation)
+                if "time" in da_var.coords:
+                    da_var = da_var.drop_vars("time")
                 # Expand dims to add band dimension
                 da_var = da_var.expand_dims(dim="band")
                 band_arrays.append(da_var)
-                band_names.append(var_name)
+                # Use the requested band name instead of NetCDF variable name
+                requested_band_name = netcdf_to_band_map.get(var_name, var_name)
+                band_names.append(requested_band_name)
 
             # Concatenate all bands for this time step
-            da_time = xr.concat(band_arrays, dim="band")
+            da_time = xr.concat(
+                band_arrays, dim="band", coords="minimal", compat="override"
+            )
             da_time = da_time.assign_coords({"band": band_names})
 
             # Expand time dimension and assign time coordinate
             da_time = da_time.expand_dims(dim="time")
             da_time = da_time.assign_coords({"time": [data_date_datetime]})
-
-            # Save individual date file if save_file is provided
-            if save_file is not None:
-                usave_file = save_file.replace(".tif", f"_{date_str}.tif")
-                save_data_array_to_file(da_time, usave_file)
 
             # Add this date's data to the list for final concatenation
             da_list.append(da_time)
@@ -1050,8 +1083,12 @@ class CDS(Connector):
         # 5. Concatenate all time steps into final DataArray
         da = xr.concat(da_list, dim="time", join="override", combine_attrs="override")
 
-        # # 6. Save final concatenated file (optional, for the full time series)
-        # save_data_array_to_file(da, save_file)
+        # 6. Save individual date files (save_data_array_to_file handles splitting by time)
+        if save_file is not None:
+            # Ensure the directory exists
+            save_dir = Path(save_file).parent
+            save_dir.mkdir(parents=True, exist_ok=True)
+        save_data_array_to_file(da, save_file)
 
         # 7. Cleanup temporary files
         shutil.rmtree(extract_dir)

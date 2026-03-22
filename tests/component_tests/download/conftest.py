@@ -446,3 +446,71 @@ def mock_cds_client(monkeypatch):
     monkeypatch.setattr("cdsapi.Client", mock_cdsapi_client)
 
     return mock_client
+
+
+@pytest.fixture
+def mock_cds_client_bbox_error(monkeypatch):
+    """
+    Mock CDS API client that simulates MARS error for bbox too small.
+
+    This fixture simulates the actual error returned by MARS when the bounding box
+    is smaller than the grid resolution (0.25° for ERA5).
+
+    Usage:
+        def test_bbox_too_small(mock_cds_client_bbox_error):
+            # CDS API calls will raise HTTPError simulating MARS bbox error
+            dc = DataConnector(connector_type="climate_data_store")
+            with pytest.raises(TerrakitValidationError):
+                data = dc.connector.get_data(...)
+    """
+    import json
+    from unittest.mock import MagicMock
+    from requests import HTTPError
+    from unittest.mock import Mock
+
+    # Create mock client
+    mock_client = MagicMock()
+
+    def mock_retrieve_bbox_error(collection_name, request_params, output_path):
+        """Simulate MARS error for bbox too small."""
+        # Simulate the actual MARS error response
+        response = Mock()
+        response.status_code = 400
+        response.reason = "Bad Request"
+        response.url = (
+            "https://cds.climate.copernicus.eu/api/retrieve/v1/jobs/test-job-id/results"
+        )
+
+        area = request_params.get("area", [])
+        response.text = json.dumps(
+            {
+                "error": {
+                    "message": "The job has failed\nMARS has returned an error, please check your selection.\n"
+                    f"Request submitted to the MARS server:\n[{{'area': {area}}}]\n"
+                    "Full error message:\n"
+                    "mars - ERROR - Exception: Assertion failed: Area: non-empty area crop/mask (to at least one point)"
+                }
+            }
+        )
+
+        error_msg = (
+            f"400 Client Error: Bad Request for url: {response.url}\n"
+            "The job has failed\n"
+            "MARS has returned an error, please check your selection.\n"
+            f"Request submitted to the MARS server:\n[{{'area': {area}}}]\n"
+            "Full error message:\n"
+            "mars - ERROR - Exception: Assertion failed: Area: non-empty area crop/mask (to at least one point)"
+        )
+        raise HTTPError(error_msg, response=response)
+
+    # Assign mock retrieve method
+    mock_client.retrieve = mock_retrieve_bbox_error
+
+    # Mock the cdsapi.Client class to return our mock
+    def mock_cdsapi_client(*args, **kwargs):
+        return mock_client
+
+    # Patch cdsapi.Client
+    monkeypatch.setattr("cdsapi.Client", mock_cdsapi_client)
+
+    return mock_client
