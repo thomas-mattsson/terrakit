@@ -1975,7 +1975,7 @@
       },
       {
         "band_name": "evaporation",
-        "alt_names": [],
+        "alt_names": ["e"],
         "resolution": "0.25 deg",
         "description": ""
       },

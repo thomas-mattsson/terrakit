@@ -1,11 +1,48 @@
 # TerraKit Data Connectors
-Data connectors are classes which enable a user to search for data and query data from a particular data source using a common set of functions.  The TerraKit Pipeline makes use of the Data Connectors, but they can also be used independently to explore and retrieve EO data. 
+Data connectors are classes which enable a user to search for data and query data from a particular data source using a common set of functions.  The TerraKit Pipeline makes use of the Data Connectors, but they can also be used independently to explore and retrieve EO data.
 
 Each data connector has the following mandatory methods:
 
 * list_collections()
 * find_data()
 * get_data()
+
+## Bounding Box Constraints
+
+**All TerraKit data connectors adhere to standard geographic bounding box constraints:**
+
+Bounding boxes must be specified in the format: `bbox = [West, South, East, North] = [min_lon, min_lat, max_lon, max_lat]`
+
+The following constraints are enforced:
+
+* **Longitude (West/East)**: `-180 <= west < east <= 180`
+* **Latitude (South/North)**: `-90 <= south < north <= 90`
+
+These constraints ensure:
+
+- Valid geographic coordinates within Earth's coordinate system
+- Proper ordering (minimum < maximum for both longitude and latitude)
+- Consistency across all data connectors regardless of the underlying data source
+
+**Example of a valid bounding box:**
+```python
+# Valid: London area
+bbox = [-0.5, 51.3, 0.3, 51.7]  # [West, South, East, North]
+
+# Valid: Global extent
+bbox = [-180, -90, 180, 90]
+
+# Invalid: West >= East
+bbox = [0.3, 51.3, -0.5, 51.7]  # ❌ West (0.3) must be < East (-0.5)
+
+# Invalid: Longitude out of range
+bbox = [-200, 51.3, 0.3, 51.7]  # ❌ West (-200) outside valid range [-180, 180]
+
+# Invalid: South >= North
+bbox = [-0.5, 51.7, 0.3, 51.3]  # ❌ South (51.7) must be < North (51.3)
+```
+
+**Note:** For regions crossing the antimeridian (180°/-180° longitude), split the query into two separate bounding boxes or use data connector-specific handling if available.
 
 
 ## Available collections

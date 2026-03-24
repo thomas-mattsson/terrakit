@@ -8,6 +8,7 @@ import logging
 import math
 import os
 import pandas as pd
+import re
 import requests
 import shutil
 import xarray as xr
@@ -17,18 +18,14 @@ from pathlib import Path
 from shapely.geometry import box
 from typing import Any, Dict, Union
 
-from terrakit.download.geodata_utils import save_cog
 from ..connector import Connector
 from ..geodata_utils import (
     load_and_list_collections,
-    map_netcdf_variables_to_requested_bands,
-    save_data_array_to_file,
 )
 from terrakit.general_utils.exceptions import (
     TerrakitValidationError,
     TerrakitValueError,
 )
-from terrakit.general_utils.geospatial_util import _convert_to_360_degree_system
 from terrakit.validate.helpers import (
     check_collection_exists,
     check_date_format,
@@ -78,6 +75,57 @@ class CDS(Connector):
 
         # Load CORDEX domains
         self.cordex_domains = CORDEX_DOMAINS
+
+    # ERA5 variable name to stepType mapping
+    # This lookup table allows inferring stepType when it's not in the filename
+    VARIABLE_STEPTYPE_MAP = {
+        # Instantaneous parameters
+        "t2m": "instant",
+        "2m_temperature": "instant",
+        "u10": "instant",
+        "10m_u_component_of_wind": "instant",
+        "v10": "instant",
+        "10m_v_component_of_wind": "instant",
+        "msl": "instant",
+        "mean_sea_level_pressure": "instant",
+        "d2m": "instant",
+        "2m_dewpoint_temperature": "instant",
+        "sp": "instant",
+        "surface_pressure": "instant",
+        "skt": "instant",
+        "skin_temperature": "instant",
+        "tcc": "instant",
+        "total_cloud_cover": "instant",
+        "tcwv": "instant",
+        "total_column_water_vapour": "instant",
+        # Accumulated parameters
+        "tp": "accum",
+        "total_precipitation": "accum",
+        "ssr": "accum",
+        "surface_net_solar_radiation": "accum",
+        "str": "accum",
+        "surface_net_thermal_radiation": "accum",
+        "e": "accum",
+        "evaporation": "accum",
+        "ro": "accum",
+        "runoff": "accum",
+        "sf": "accum",
+        "snowfall": "accum",
+        "ssrd": "accum",
+        "surface_solar_radiation_downwards": "accum",
+        "strd": "accum",
+        "surface_thermal_radiation_downwards": "accum",
+        # Mean rate parameters
+        "avg_tprate": "avg",
+        "mean_total_precipitation_rate": "avg",
+        # Min/Max parameters
+        "mx2t": "max",
+        "maximum_2m_temperature_since_previous_post_processing": "max",
+        "mn2t": "min",
+        "minimum_2m_temperature_since_previous_post_processing": "min",
+        "fg10": "max",
+        "10m_wind_gust_since_previous_post_processing": "max",
+    }
 
     def _is_cordex_collection(self, collection_name: str) -> bool:
         """Check if collection is a CORDEX dataset."""
@@ -142,50 +190,48 @@ class CDS(Connector):
         )
         return best_domain
 
-    def _convert_netcdf_to_geotiffs(
-        self, netcdf_path: str, bbox: list, output_dir: str, collection_name: str
-    ) -> list[str]:
-        """Convert CDS NetCDF to individual GeoTIFF files, one per date."""
+    def _infer_steptype(self, filename: str, variable_name: str) -> str:
+        """
+        Infer stepType from filename or variable name.
 
-        ds = xr.open_dataset(netcdf_path)
-        output_files = []
+        Uses a three-tier approach:
+        1. Extract from filename if present (stepType-xxx)
+        2. Look up variable name in VARIABLE_STEPTYPE_MAP
+        3. Fall back to "unknown"
 
-        # Determine dimension names
-        lon_name = "longitude" if "longitude" in ds.dims else "lon"
-        lat_name = "latitude" if "latitude" in ds.dims else "lat"
-        time_name = "time" if "time" in ds.dims else "valid_time"
+        Parameters
+        ----------
+        filename : str
+            NetCDF filename
+        variable_name : str
+            Variable name from the dataset
 
-        # Get the main data variable
-        data_vars = [
-            v for v in ds.data_vars if v not in [lon_name, lat_name, time_name]
-        ]
-        var_name = data_vars[0]
+        Returns
+        -------
+        str
+            stepType: 'instant', 'accum', 'avg', 'max', 'min', or 'unknown'
+        """
+        # Method 1: Try extracting from filename for variables consolidated by stepType
+        if "stepType-" in filename:
+            step_type = filename.split("stepType-")[1].split(".")[0]
+            logger.debug(f"Extracted stepType '{step_type}' from filename: {filename}")
+            return step_type
 
-        # Process each time step
-        for time_idx in range(len(ds[time_name])):
-            # Extract data for this time step
-            da = ds[var_name].isel({time_name: time_idx})
+        # Method 2: Look up variable name in mapping
+        if variable_name in self.VARIABLE_STEPTYPE_MAP:
+            step_type = self.VARIABLE_STEPTYPE_MAP[variable_name]
+            logger.debug(
+                f"Inferred stepType '{step_type}' from variable name: {variable_name}"
+            )
+            return step_type
 
-            # Get the date
-            time_value = ds[time_name].isel({time_name: time_idx}).values
-            date_str = pd.Timestamp(time_value).strftime("%Y-%m-%d")
-
-            # Add CRS and spatial dimensions
-            da = da.rio.write_crs("EPSG:4326")
-            da = da.rio.set_spatial_dims(x_dim=lon_name, y_dim=lat_name)
-
-            # Create output filename
-            output_filename = f"{collection_name}_{date_str}.tif"
-            output_path = Path(output_dir) / output_filename
-
-            # Use TerraKit's save_cog function
-            save_cog(da, str(output_path))
-            output_files.append(str(output_path))
-
-            logger.info(f"Created GeoTIFF: {output_filename}")
-
-        ds.close()
-        return output_files
+        # Method 3: Fall back to unknown
+        logger.warning(
+            f"Could not determine stepType for variable '{variable_name}' "
+            f"in file '{filename}'. Marking as 'unknown'. "
+            f"Consider adding this variable to VARIABLE_STEPTYPE_MAP."
+        )
+        return "unknown"
 
     def _estimate_request_size(
         self,
@@ -482,14 +528,13 @@ class CDS(Connector):
             # ERA5 and other collections use bbox directly
             # CDS API expects area as [North, West, South, East]
             # Input bbox is [min_lon, min_lat, max_lon, max_lat] = [West, South, East, North]
-            # CDS uses 0-360° longitude convention, so convert negative longitudes
-            converted_lons = _convert_to_360_degree_system([bbox[0], bbox[2]])
-
+            # ERA5 uses -180 to 180° longitude convention (NOT 0-360°)
+            # Do NOT convert longitudes - use them as-is
             params["area"] = [
                 bbox[3],  # North (max_lat)
-                converted_lons[0],  # West (min_lon, converted to 0-360°)
+                bbox[0],  # West (min_lon) - keep in -180/180 system
                 bbox[1],  # South (min_lat)
-                converted_lons[1],  # East (max_lon, converted to 0-360°)
+                bbox[2],  # East (max_lon) - keep in -180/180 system
             ]
 
             # Set default parameters for ERA5 collections
@@ -665,19 +710,51 @@ class CDS(Connector):
 
         # Check minimum bbox size for ERA5 collections (0.25° grid resolution)
         if not self._is_cordex_collection(collection_name):
-            min_lon, min_lat, max_lon, max_lat = bbox
+            # ERA5 uses -180/180° system, so work directly with bbox values
+            min_lon = bbox[0]  # West (min_lon in -180/180°)
+            min_lat = bbox[1]  # South (min_lat)
+            max_lat = bbox[3]  # North (max_lat)
+            max_lon = bbox[2]  # East (max_lon in -180/180°)
             lon_span = max_lon - min_lon
             lat_span = max_lat - min_lat
 
             # ERA5 has 0.25° resolution, require at least 0.25° in each dimension
             MIN_RESOLUTION = 0.25
             if lon_span < MIN_RESOLUTION or lat_span < MIN_RESOLUTION:
-                raise TerrakitValidationError(
-                    message=f"Bounding box too small for ERA5 data resolution. "
-                    f"Current size: {lon_span:.4f}° × {lat_span:.4f}°. "
-                    f"Minimum required: {MIN_RESOLUTION}° × {MIN_RESOLUTION}° "
-                    f"(ERA5 grid resolution is 0.25°). "
-                    f"Please increase your bounding box size."
+                # Store original values for logging
+                orig_lon_span = lon_span
+                orig_lat_span = lat_span
+
+                # Calculate how much to expand in each dimension
+                lon_deficit = max(0, MIN_RESOLUTION - lon_span)
+                lat_deficit = max(0, MIN_RESOLUTION - lat_span)
+
+                # Expand equally on both sides to preserve center point
+                expand_lon = lon_deficit / 2
+                expand_lat = lat_deficit / 2
+
+                # Calculate new bounds in -180/180 system (original bbox system)
+                new_min_lon = bbox[0] - expand_lon
+                new_max_lon = bbox[2] + expand_lon
+                new_min_lat = bbox[1] - expand_lat
+                new_max_lat = bbox[3] + expand_lat
+
+                # Update bbox in place (keep in -180/180 system)
+                bbox[0] = new_min_lon  # west
+                bbox[1] = new_min_lat  # south
+                bbox[2] = new_max_lon  # east
+                bbox[3] = new_max_lat  # north
+
+                # Calculate final dimensions for logging
+                final_lon_span = new_max_lon - new_min_lon
+                final_lat_span = new_max_lat - new_min_lat
+
+                # Log warning to user
+                logger.warning(
+                    f"Bounding box expanded to meet ERA5 minimum resolution requirement. "
+                    f"Original size: {orig_lon_span:.4f}° × {orig_lat_span:.4f}°. "
+                    f"Expanded to: {final_lon_span:.4f}° × {final_lat_span:.4f}°. "
+                    f"New bbox: [{bbox[0]:.4f}, {bbox[1]:.4f}, {bbox[2]:.4f}, {bbox[3]:.4f}]"
                 )
 
         # For CORDEX collections, map bbox to domain
@@ -707,20 +784,40 @@ class CDS(Connector):
 
             allowed_bbox = bbox_list[0]
 
-            # Unpack for clarity
-            min_lon, min_lat, max_lon, max_lat = bbox
+            # ERA5 uses -180/180° system, but constraints file has 0-360° format
+            # Convert constraints bbox from 0-360° to -180/180° for validation
             allowed_min_lon, allowed_min_lat, allowed_max_lon, allowed_max_lat = (
                 allowed_bbox
             )
 
-            # Validate each bound
+            # Convert allowed longitude bounds from 0-360° to -180/180°
+            # 0° stays 0°, but 360° becomes 180° (not -180° to avoid wrap issues)
+            # For global coverage [0, 360] we want [-180, 180]
+            if allowed_min_lon == 0 and allowed_max_lon == 360:
+                # Global coverage case
+                allowed_min_lon = -180
+                allowed_max_lon = 180
+            else:
+                # Convert individual values
+                if allowed_min_lon > 180:
+                    allowed_min_lon -= 360
+                if allowed_max_lon > 180:
+                    allowed_max_lon -= 360
+
+            # User bbox is already in -180/180° system
+            min_lon = bbox[0]
+            max_lon = bbox[2]
+            min_lat = bbox[1]
+            max_lat = bbox[3]
+
+            # Validate each bound (using -180/180° for longitude)
             errors = []
             if min_lon < allowed_min_lon:
-                errors.append(f"min_lon {min_lon} < allowed {allowed_min_lon}")
+                errors.append(f"min_lon {min_lon:.4f} < allowed {allowed_min_lon}")
             if min_lat < allowed_min_lat:
                 errors.append(f"min_lat {min_lat} < allowed {allowed_min_lat}")
             if max_lon > allowed_max_lon:
-                errors.append(f"max_lon {max_lon} > allowed {allowed_max_lon}")
+                errors.append(f"max_lon {max_lon:.4f} > allowed {allowed_max_lon}")
             if max_lat > allowed_max_lat:
                 errors.append(f"max_lat {max_lat} > allowed {allowed_max_lat}")
 
@@ -925,7 +1022,7 @@ class CDS(Connector):
         data_connector_spec=None,
         save_file=None,
         working_dir=".",
-    ) -> Union[xr.DataArray, None]:
+    ) -> Union[xr.Dataset, None]:
         """
         Fetches data from Climate Data Store for the specified collection, date range, area, and bands.
 
@@ -938,16 +1035,29 @@ class CDS(Connector):
             bands (list, optional): List of bands to retrieve. Defaults to all bands.
             query_params (dict, optional): Additional query parameters. Defaults to {}.
             data_connector_spec (dict, optional): Data connector specification. Defaults to None.
-            save_file (str, optional): Path to save the output file. If provided, individual GeoTIFF files
-                will be saved for each date with the naming pattern: {save_file}_{date}.tif
-                (e.g., 'output_2025-01-01.tif', 'output_2025-01-02.tif'). Each file contains all
+            save_file (str, optional): Path to save the output file. If provided, individual NetCDF files
+                will be saved for each date with the naming pattern: {save_file}_{date}.nc
+                (e.g., 'output_2025-01-01.nc', 'output_2025-01-02.nc'). Each file contains all
                 requested bands for that specific date. If None, no files are saved to disk. Defaults to None.
             working_dir (str, optional): Working directory for temporary files. Defaults to '.'.
 
         Returns:
-            xarray.DataArray: An xarray DataArray containing all fetched data with dimensions (time, band, y, x).
-                All dates are stacked along the time dimension, and all bands are stacked along the band dimension.
-                If save_file is provided, individual date files are also saved to disk.
+            xarray.Dataset: An xarray Dataset containing all fetched data with variables as data variables.
+                Each variable has dimensions (time, latitude, longitude) and includes a 'stepType'
+                attribute indicating the parameter class ('instant', 'accum', 'avg', 'max', 'min').
+
+                To convert to the old DataArray format:
+                    data_array = dataset.to_array(dim='band')
+
+        Note:
+            This method now returns xarray.Dataset instead of xarray.DataArray to preserve
+            parameter class (stepType) information. To convert to the old format:
+
+                data_array = dataset.to_array(dim='band')
+
+            This allows accessing data as before:
+
+                temp = data_array.sel(band='2m_temperature')
 
         Example:
             ```python
@@ -959,7 +1069,7 @@ class CDS(Connector):
                 date_start="2025-01-01",
                 date_end="2025-01-02",
                 bbox=[-1.32, 51.06, -1.30, 51.08],
-                bands=["2m_temperature"],
+                bands=["2m_temperature", "total_precipitation"],
                 query_params={
                     "daily_statistic": "daily_minimum",
                     "frequency": "1hr",
@@ -967,8 +1077,20 @@ class CDS(Connector):
                     }
                 )
                 save_file="./derived-era5-single-levels-daily-statistics",
+
+            # Access variables
+            temperature = data['2m_temperature']
+            print(temperature.attrs['stepType'])  # 'instant'
+
+            # Filter by stepType
+            instant_vars = [v for v in data.data_vars if data[v].attrs.get('stepType') == 'instant']
             ```
         """
+
+        # Load constraints and validate parameters
+        constraints = self._load_constraints(data_collection_name)
+        self._validate_temporal(date_start, date_end, constraints, data_collection_name)
+        self._validate_spatial(bbox, constraints, data_collection_name)
 
         # 1. Download zip from CDS API
         zip_path = self._download_from_cds(
@@ -988,26 +1110,19 @@ class CDS(Connector):
         with zipfile.ZipFile(zip_path, "r") as zip_ref:
             zip_ref.extractall(extract_dir)
 
-        # 3. Find NetCDF file(s)
+        # 3. Find NetCDF file(s) and extract stepType from filenames
         netcdf_files = list(extract_dir.glob("*.nc"))
         if not netcdf_files:
             raise TerrakitValueError(f"No NetCDF files found in {zip_path}")
 
-        # 4. Load NetCDF and process into DataArray per date
-        # CDS may return multiple NetCDF files (one per variable)
-        # We need to merge them by date to avoid duplicates
+        # 4. Load NetCDF and process into Dataset with stepType preservation
+        # CDS may return multiple NetCDF files (one per stepType)
+        # Extract stepType from filename: data_stream-oper_stepType-{type}.nc
 
-        # Create mapping from NetCDF variable names to requested band names
-        # CDS returns abbreviated names (e.g., "t2m"), but we want to use
-        # the requested names (e.g., "2m_temperature") as band labels
-        netcdf_to_band_map = map_netcdf_variables_to_requested_bands(
-            netcdf_files, bands
-        )
-
-        # First, collect all data organized by date
+        # Collect data organized by stepType and date
         date_data_dict: Dict[
-            str, Dict[str, xr.DataArray]
-        ] = {}  # {date_str: {netcdf_var_name: DataArray}}
+            str, Dict[str, tuple[xr.DataArray, str]]
+        ] = {}  # {date_str: {var_name: (DataArray, stepType)}}
 
         for netcdf_file in netcdf_files:
             ds = xr.open_dataset(netcdf_file)
@@ -1017,82 +1132,196 @@ class CDS(Connector):
             lat_name = "latitude" if "latitude" in ds.dims else "lat"
             time_name = "time" if "time" in ds.dims else "valid_time"
 
+            # Determine if this is a single-variable file or multi-variable file
+            # Single-variable files don't have stepType in filename
+            is_single_variable_file = not any(
+                step in netcdf_file.name
+                for step in ["accum", "avg", "instant", "max", "min"]
+            )
+
             # Get the main data variable(s) - these are our bands
             data_vars = [
                 v for v in ds.data_vars if v not in [lon_name, lat_name, time_name]
             ]
 
+            # Log variables found in this file
+            # all_variables_found.update(data_vars)
+            logger.debug(f"File {netcdf_file.name} contains variables: {data_vars}")
+
             # Process each time step
             for time_idx in range(len(ds[time_name])):
                 # Extract the date for this time step
                 time_value = ds[time_name].isel({time_name: time_idx}).values
+
+                # date_str = pd.Timestamp(time_value).strftime("%Y-%m-%d %H:%M")
                 date_str = pd.Timestamp(time_value).strftime("%Y-%m-%d")
 
                 # Initialize dict for this date if not exists
                 if date_str not in date_data_dict:
                     date_data_dict[date_str] = {}
 
-                # Store each variable for this date
+                # Confirm variable name by extracting from filename if needed
+                # If the NetCDF file doesn't contain stepType in its name and has only one variable,
+                # extract the variable name from the filename pattern
+
+                # Extract variable name from filename if this is a single-variable file
+                extracted_var_name = None
+
+                if is_single_variable_file:
+                    # Extract variable name from filename pattern: variable_name_YYYYMMDD_HHMMSS.nc
+                    match = re.match(r"^([a-zA-Z0-9_]+?)_\d", netcdf_file.name)
+                    if match:
+                        extracted_var_name = match.group(1)
+
+                        logger.debug(
+                            f"Extracted variable name '{extracted_var_name}' from filename {netcdf_file.name}"
+                        )
+
+                # Store each variable for this date with its stepType
                 for var_name in data_vars:
-                    # Extract data for this specific time step
-                    da_var = ds[var_name].isel({time_name: time_idx})
+                    # Determine which variable name to use for stepType inference and data access
+                    # For stepType inference: use extracted name if available, otherwise use original
+                    steptype_var_name = (
+                        extracted_var_name if extracted_var_name else var_name
+                    )
+                    # For data access: always use the original variable name from the NetCDF
+                    data_access_var_name = var_name
+
+                    # Try to get stepType from GRIB_stepType attribute first
+                    if "GRIB_stepType" in ds[var_name].attrs:
+                        step_type = ds[var_name].attrs["GRIB_stepType"]
+                        logger.debug(
+                            f"Extracted stepType '{step_type}' from GRIB_stepType attribute for variable '{var_name}'"
+                        )
+                    else:
+                        # Fall back to inference method
+                        step_type = self._infer_steptype(
+                            netcdf_file.name, steptype_var_name
+                        )
+
+                    # Extract data for this specific time step using the original NetCDF variable name
+                    da_var = ds[data_access_var_name].isel({time_name: time_idx})
 
                     # Add CRS and spatial dimensions
                     da_var = da_var.rio.write_crs("EPSG:4326")
                     da_var = da_var.rio.set_spatial_dims(x_dim=lon_name, y_dim=lat_name)
 
-                    # Store in dict
-                    date_data_dict[date_str][var_name] = da_var
+                    # Store in dict with stepType using the appropriate variable name
+                    # Use extracted name if available for consistency in output, otherwise use original
+                    output_var_name = (
+                        extracted_var_name if extracted_var_name else var_name
+                    )
+                    date_data_dict[date_str][output_var_name] = (da_var, step_type)
 
             ds.close()
 
-        # Now process each unique date
-        da_list = []
+        # Now process each unique date and build a Dataset with stepType attributes
+        # Build data for each band across all time steps, tracking dates for each band
+        band_data: Dict[
+            str, Dict[str, Any]
+        ] = {}  # {band_name: {'data': list, 'dates': list, 'stepType': str}}
+
         for date_str in sorted(date_data_dict.keys()):
             data_date_datetime = datetime.strptime(date_str, "%Y-%m-%d")
             var_dict = date_data_dict[date_str]
 
-            # Collect all variables for this date
-            band_arrays = []
-            band_names = []
             for var_name in sorted(var_dict.keys()):
-                da_var = var_dict[var_name]
-                # Drop time coordinate if it exists (will be added back after concatenation)
+                da_var, step_type = var_dict[var_name]
+
+                # Drop time coordinate if it exists
                 if "time" in da_var.coords:
                     da_var = da_var.drop_vars("time")
-                # Expand dims to add band dimension
-                da_var = da_var.expand_dims(dim="band")
-                band_arrays.append(da_var)
-                # Use the requested band name instead of NetCDF variable name
-                requested_band_name = netcdf_to_band_map.get(var_name, var_name)
-                band_names.append(requested_band_name)
 
-            # Concatenate all bands for this time step
-            da_time = xr.concat(
-                band_arrays, dim="band", coords="minimal", compat="override"
+                # Use the NetCDF variable name directly as the band name
+                # This ensures we preserve the original variable names from CDS
+                band_name = var_name
+
+                # Initialize band_data entry if needed
+                if band_name not in band_data:
+                    band_data[band_name] = {
+                        "data": [],
+                        "dates": [],
+                        "stepType": step_type,
+                    }
+
+                # Store the data array and its corresponding date
+                band_data[band_name]["data"].append(da_var)
+                band_data[band_name]["dates"].append(data_date_datetime)
+
+        # 5. Create Dataset with stepType attributes
+        # Each variable gets its own time coordinate based on which dates it has data for
+        merged_dataset = xr.Dataset()
+
+        for band_name, band_info in band_data.items():
+            # Concatenate all time steps for this band
+            data_arrays = band_info["data"]
+            dates = band_info["dates"]
+
+            # Check for duplicate dates
+            if len(dates) != len(set(dates)):
+                logger.warning(f"Variable {band_name} has duplicate dates: {dates}")
+                # Remove duplicates by keeping only unique dates
+                seen_dates = {}
+                unique_data = []
+                unique_dates = []
+                for da, date in zip(data_arrays, dates):
+                    if date not in seen_dates:
+                        seen_dates[date] = True
+                        unique_data.append(da)
+                        unique_dates.append(date)
+                data_arrays = unique_data
+                dates = unique_dates
+                logger.info(
+                    f"After deduplication: {len(dates)} unique dates for {band_name}"
+                )
+
+            # Stack along a new dimension first
+            # Use coords='minimal' to avoid issues with inconsistent coordinates like 'number'
+            band_da = xr.concat(
+                data_arrays, dim="time", coords="minimal", compat="override"
             )
-            da_time = da_time.assign_coords({"band": band_names})
 
-            # Expand time dimension and assign time coordinate
-            da_time = da_time.expand_dims(dim="time")
-            da_time = da_time.assign_coords({"time": [data_date_datetime]})
+            # Assign the time coordinate specific to this variable
+            band_da = band_da.assign_coords({"time": dates})
 
-            # Add this date's data to the list for final concatenation
-            da_list.append(da_time)
+            # Add stepType to variable attributes
+            band_da.attrs["stepType"] = band_info["stepType"]
 
-        # 5. Concatenate all time steps into final DataArray
-        da = xr.concat(da_list, dim="time", join="override", combine_attrs="override")
+            # Add to merged dataset
+            merged_dataset[band_name] = band_da
 
-        # 6. Save individual date files (save_data_array_to_file handles splitting by time)
+        # Add dataset-level attributes
+        merged_dataset.attrs["source"] = "Climate Data Store (CDS)"
+        merged_dataset.attrs["dataset"] = data_collection_name
+
+        # Write CRS (EPSG:4326 for CDS data)
+        merged_dataset.rio.write_crs("EPSG:4326", inplace=True)
+
+        # 6. Save individual date files as NetCDF
         if save_file is not None:
             # Ensure the directory exists
             save_dir = Path(save_file).parent
             save_dir.mkdir(parents=True, exist_ok=True)
-        save_data_array_to_file(da, save_file)
+
+            # Remove file extension if it exists on save_file
+            save_file_base = str(Path(save_file).with_suffix(""))
+
+            # Save each date separately
+            unique_dates = sorted(set(merged_dataset.time.values))
+            for date in unique_dates:
+                daily_data = merged_dataset.sel(time=date)
+                date_str = pd.Timestamp(date).strftime("%Y-%m-%d")
+
+                filename = f"{save_file_base}_{date_str}.nc"
+
+                daily_data.to_netcdf(filename)
+                logger.info(f"Saved {filename}")
 
         # 7. Cleanup temporary files
         shutil.rmtree(extract_dir)
         Path(zip_path).unlink()
 
-        logger.info(f"Processed {len(da_list)} time steps into DataArray")
-        return da
+        logger.info(
+            f"Processed {len(merged_dataset.time)} time steps and {len(merged_dataset.data_vars)} variables into Dataset"
+        )
+        return merged_dataset
