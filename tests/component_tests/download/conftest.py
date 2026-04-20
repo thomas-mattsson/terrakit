@@ -15,8 +15,10 @@ import xarray as xr
 
 from glob import glob
 from pathlib import Path
+from requests import HTTPError
 from sentinelhub import SentinelHubRequest
 from unittest.mock import MagicMock
+from unittest.mock import Mock
 
 
 ############################# Test Parameters ############################
@@ -398,7 +400,7 @@ def mock_cds_client(monkeypatch):
     # cds = cdsapi.Client()
     # downloaded_filename = cds.retrieve(data_collection_name, request).download()
 
-    # This data is now replaced by synthetic test data, the script for generating the test zip file can be found in /Users/rosielickorish/Documents/IBMResearch/2026/terrakit/tests/resources/scripts.
+    # This data is now replaced by synthetic test data, the script for generating the test zip file can be found in ./tests/resources/scripts.
 
     Usage:
         def test_cds_download(mock_cds_client):
@@ -406,10 +408,6 @@ def mock_cds_client(monkeypatch):
             dc = DataConnector(connector_type="climate_data_store")
             data = dc.connector.get_data(...)
     """
-    import shutil
-    from pathlib import Path
-    from unittest.mock import MagicMock
-
     # Path to test zip file
     TEST_ZIP = Path(
         "./tests/resources/climate_data_store/era5_daily_statistics_test_data.zip"
@@ -451,7 +449,7 @@ def mock_cds_client(monkeypatch):
 @pytest.fixture
 def mock_cds_client_bbox_error(monkeypatch):
     """
-    Mock CDS API client that simulates MARS error for bbox too small.
+    Mock CDS API client that simulates Meteorological Archival and Retrieval System (MARS) error for bbox too small.
 
     This fixture simulates the actual error returned by MARS when the bounding box
     is smaller than the grid resolution (0.25° for ERA5).
@@ -463,16 +461,11 @@ def mock_cds_client_bbox_error(monkeypatch):
             with pytest.raises(TerrakitValidationError):
                 data = dc.connector.get_data(...)
     """
-    import json
-    from unittest.mock import MagicMock
-    from requests import HTTPError
-    from unittest.mock import Mock
-
     # Create mock client
     mock_client = MagicMock()
 
     def mock_retrieve_bbox_error(collection_name, request_params, output_path):
-        """Simulate MARS error for bbox too small."""
+        """Simulate Meteorological Archival and Retrieval System (MARS) error for bbox too small."""
         # Simulate the actual MARS error response
         response = Mock()
         response.status_code = 400

@@ -45,7 +45,7 @@ bbox = [-0.5, 51.7, 0.3, 51.3]  # ❌ South (51.7) must be < North (51.3)
 **Note:** For regions crossing the antimeridian (180°/-180° longitude), split the query into two separate bounding boxes or use data connector-specific handling if available.
 
 
-## Available collections
+## Available data connectors and collections
 The following data connectors and associated collections are available:
 
 | Connectors        | Collections |

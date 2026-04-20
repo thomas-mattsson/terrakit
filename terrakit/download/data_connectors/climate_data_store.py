@@ -1018,10 +1018,11 @@ class CDS(Connector):
         area_polygon=None,
         bbox=None,
         bands=[],
-        query_params={},
+        maxcc=100,
         data_connector_spec=None,
         save_file=None,
         working_dir=".",
+        query_params={},
     ) -> Union[xr.Dataset, None]:
         """
         Fetches data from Climate Data Store for the specified collection, date range, area, and bands.

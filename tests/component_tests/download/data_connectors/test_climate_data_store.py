@@ -492,7 +492,7 @@ class TestClimateDataStore:
         self, mock_cds_client_bbox_error, start_date, save_file_dir
     ):
         """
-        Test that get_data handles MARS error for bbox smaller than ERA5 grid resolution (0.25°).
+        Test that get_data handles Meteorological Archival and Retrieval System (MARS) error for bbox smaller than ERA5 grid resolution (0.25°).
 
         This test uses a mock that simulates the actual MARS error response when the bbox
         is too small. The error should be caught and converted to a TerrakitValidationError
